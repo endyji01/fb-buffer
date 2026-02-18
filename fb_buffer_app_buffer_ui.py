@@ -8,31 +8,98 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import time
 
-st.set_page_config(page_title="My Buffer PRO", layout="wide", initial_sidebar_state="expanded")
+# ────────────────────────────────────────────────
+#               BUFFER-STYLE UI & CONFIG
+# ────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="My Buffer PRO",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 st.markdown("""
 <style>
     .main {background-color: #f8f9fa;}
-    .card {background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 20px;}
-    .preview-card {border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: white; max-width: 380px;}
-    .status-published {background: #d4edda; color: #155724; padding: 4px 12px; border-radius: 20px; font-size: 12px;}
-    .status-pending {background: #fff3cd; color: #856404; padding: 4px 12px; border-radius: 20px; font-size: 12px;}
-    .status-failed {background: #f8d7da; color: #721c24; padding: 4px 12px; border-radius: 20px; font-size: 12px;}
+    .card {
+        background: white;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        margin-bottom: 20px;
+    }
+    .preview-card {
+        border: 1px solid #ddd;
+        border-radius: 12px;
+        padding: 16px;
+        background: white;
+        max-width: 380px;
+    }
+    .status-published {
+        background: #d4edda;
+        color: #155724;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+    }
+    .status-pending {
+        background: #fff3cd;
+        color: #856404;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+    }
+    .status-failed {
+        background: #f8d7da;
+        color: #721c24;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 DB_FILE = "fb_scheduler.db"
-API_VERSION = "v24.0"
+API_VERSION = "v20.0"  # update if needed
+
+# ────────────────────────────────────────────────
+#                   DATABASE
+# ────────────────────────────────────────────────
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("PRAGMA journal_mode=WAL")
-    c.execute('''CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, name TEXT, page_id TEXT, token TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY, account_ids TEXT, post_type TEXT, media_url TEXT, caption TEXT, first_comment TEXT, story_link TEXT, scheduled_dt TEXT, status TEXT DEFAULT 'pending', fb_post_id TEXT)''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            page_id TEXT UNIQUE,
+            token TEXT
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_ids TEXT,
+            post_type TEXT,
+            media_url TEXT,
+            caption TEXT,
+            first_comment TEXT,
+            story_link TEXT,
+            scheduled_dt TEXT,
+            status TEXT DEFAULT 'pending',
+            fb_post_id TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
+
+# ────────────────────────────────────────────────
+#                 FACEBOOK POSTER
+# ────────────────────────────────────────────────
 
 class FBPoster:
     def __init__(self, page_id, token):
@@ -43,9 +110,7 @@ class FBPoster:
     def get_direct_url(self, url):
         url = url.strip()
         if "dropbox.com" in url:
-            url = url.replace("?dl=0", "?dl=1")
-            if "www.dropbox.com" in url:
-                url = url.replace("www.dropbox.com", "dl.dropboxusercontent.com")
+            url = url.replace("?dl=0", "?dl=1").replace("www.dropbox.com", "dl.dropboxusercontent.com")
         elif "drive.google.com" in url:
             if "/file/d/" in url:
                 file_id = url.split("/file/d/")[1].split("/")[0]
@@ -71,36 +136,62 @@ class FBPoster:
     def post_reel(self, media_url, caption="", scheduled_dt=None):
         temp_path = self.download_media(media_url)
         try:
-            r = requests.post(f"{self.graph}/{self.page_id}/video_reels", data={"upload_phase": "start", "access_token": self.token})
+            r = requests.post(
+                f"{self.graph}/{self.page_id}/video_reels",
+                data={"upload_phase": "start", "access_token": self.token}
+            )
             video_id = r.json()["video_id"]
             upload_url = f"https://rupload.facebook.com/video-upload/{API_VERSION}/{video_id}"
             with open(temp_path, "rb") as f:
                 file_size = os.path.getsize(temp_path)
-                headers = {"Authorization": f"OAuth {self.token}", "offset": "0", "file_size": str(file_size)}
+                headers = {
+                    "Authorization": f"OAuth {self.token}",
+                    "offset": "0",
+                    "file_size": str(file_size)
+                }
                 requests.post(upload_url, headers=headers, data=f)
-            finish_data = {"upload_phase": "finish", "video_id": video_id, "description": caption, "access_token": self.token}
+            finish_data = {
+                "upload_phase": "finish",
+                "video_id": video_id,
+                "description": caption,
+                "access_token": self.token
+            }
             if scheduled_dt and scheduled_dt > datetime.now():
                 finish_data["video_state"] = "SCHEDULED"
                 finish_data["scheduled_publish_time"] = int(scheduled_dt.timestamp())
+            else:
+                finish_data["video_state"] = "PUBLISHED"
             r = requests.post(f"{self.graph}/{self.page_id}/video_reels", data=finish_data)
             return r.json()
         finally:
-            if os.path.exists(temp_path): os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def post_story(self, media_url, is_video=True):
         temp_path = self.download_media(media_url)
         try:
             endpoint = "video_stories" if is_video else "photo_stories"
-            r = requests.post(f"{self.graph}/{self.page_id}/{endpoint}", data={"upload_phase": "start", "access_token": self.token})
+            r = requests.post(
+                f"{self.graph}/{self.page_id}/{endpoint}",
+                data={"upload_phase": "start", "access_token": self.token}
+            )
             media_id = r.json().get("video_id") or r.json().get("photo_id")
             upload_url = f"https://rupload.facebook.com/video-upload/{API_VERSION}/{media_id}"
             with open(temp_path, "rb") as f:
-                headers = {"Authorization": f"OAuth {self.token}", "offset": "0", "file_size": str(os.path.getsize(temp_path))}
+                headers = {
+                    "Authorization": f"OAuth {self.token}",
+                    "offset": "0",
+                    "file_size": str(os.path.getsize(temp_path))
+                }
                 requests.post(upload_url, headers=headers, data=f)
-            r = requests.post(f"{self.graph}/{self.page_id}/{endpoint}", data={"upload_phase": "finish", "access_token": self.token, "video_id" if is_video else "photo_id": media_id})
+            r = requests.post(
+                f"{self.graph}/{self.page_id}/{endpoint}",
+                data={"upload_phase": "finish", "access_token": self.token, "video_id" if is_video else "photo_id": media_id}
+            )
             return r.json()
         finally:
-            if os.path.exists(temp_path): os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def post_regular(self, caption, media_url=None, scheduled_dt=None):
         url = f"{self.graph}/{self.page_id}/feed" if not media_url else f"{self.graph}/{self.page_id}/photos"
@@ -113,12 +204,20 @@ class FBPoster:
         r = requests.post(url, data=data)
         return r.json()
 
+# ────────────────────────────────────────────────
+#                   SCHEDULER
+# ────────────────────────────────────────────────
+
 scheduler = BackgroundScheduler()
 scheduler.start()
 
 def check_and_publish():
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM posts WHERE status = 'pending' AND scheduled_dt <= ?", conn, params=(datetime.now().isoformat(),))
+    df = pd.read_sql(
+        "SELECT * FROM posts WHERE status = 'pending' AND scheduled_dt <= ?",
+        conn,
+        params=(datetime.now().isoformat(),)
+    )
     conn.close()
     for _, row in df.iterrows():
         accounts = row["account_ids"].split(",")
@@ -132,7 +231,7 @@ def check_and_publish():
                 if row["post_type"] == "Reel":
                     result = poster.post_reel(row["media_url"], row["caption"], scheduled)
                 elif row["post_type"] == "Story":
-                    is_video = row["media_url"].lower().endswith(('.mp4','.mov'))
+                    is_video = row["media_url"].lower().endswith(('.mp4', '.mov'))
                     result = poster.post_story(row["media_url"], is_video)
                 else:
                     result = poster.post_regular(row["caption"], row["media_url"], scheduled)
@@ -157,17 +256,37 @@ def check_and_publish():
 
 scheduler.add_job(check_and_publish, 'interval', seconds=30)
 
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Buffer_logo.svg/512px-Buffer_logo.svg.png", width=160)
+# ────────────────────────────────────────────────
+#                     SIDEBAR & HEADER
+# ────────────────────────────────────────────────
+
+st.sidebar.image(
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Buffer_logo.svg/512px-Buffer_logo.svg.png",
+    width=160
+)
 st.sidebar.markdown("### My Buffer PRO")
-page = st.sidebar.radio("Navigation", 
-    ["🏠 Dashboard", "✍️ Create Post", "📦 Bulk Schedule", "📄 Per Page Posting", "📋 Queue", "📊 Analytics", "👥 Accounts"],
-    label_visibility="collapsed")
-st.sidebar.caption("Free 50GB Storage • 24/7 with Pinger")
+page = st.sidebar.radio(
+    "Navigation",
+    [
+        "🏠 Dashboard",
+        "✍️ Create Post",
+        "📦 Bulk Schedule",
+        "📄 Per Page Posting",
+        "📋 Queue",
+        "📊 Analytics",
+        "👥 Accounts"
+    ],
+    label_visibility="collapsed"
+)
+st.sidebar.caption("Free 50GB Storage • 24/7 with UptimeRobot")
 
 st.title("🚀 My Buffer PRO")
 st.caption("Your private Buffer – beautiful, fast, free forever")
 
-# Dashboard
+# ────────────────────────────────────────────────
+#                      DASHBOARD
+# ────────────────────────────────────────────────
+
 if page == "🏠 Dashboard":
     conn = sqlite3.connect(DB_FILE)
     total_pages = pd.read_sql("SELECT COUNT(*) as c FROM accounts", conn).iloc[0,0]
@@ -179,49 +298,70 @@ if page == "🏠 Dashboard":
     c2.metric("Pending Posts", f"{pending:,}")
     c3.metric("Published", f"{published:,}")
 
-# Create Post with Preview
+# ────────────────────────────────────────────────
+#                   CREATE POST
+# ────────────────────────────────────────────────
+
 elif page == "✍️ Create Post":
     col1, col2 = st.columns([3, 2])
     with col1:
         conn = sqlite3.connect(DB_FILE)
         acc_df = pd.read_sql("SELECT id, name FROM accounts", conn)
         conn.close()
-        selected_accounts = st.multiselect("📍 Post to these Pages", options=acc_df["name"].tolist(), placeholder="Choose pages...")
+        selected_accounts = st.multiselect(
+            "📍 Post to these Pages",
+            options=acc_df["name"].tolist(),
+            placeholder="Choose pages..."
+        )
         post_type = st.selectbox("📹 Post Type", ["Reel", "Story", "Image Feed"])
         caption = st.text_area("✍️ Caption", height=100, placeholder="Write your caption here...")
         media_url = st.text_input("🔗 Media URL", placeholder="Paste share link here...")
-        story_link = st.text_input("🔗 Story Link (optional)") if post_type == "Story" else ""
+        story_link = ""
+        if post_type == "Story":
+            story_link = st.text_input("🔗 Story Link (optional)", placeholder="Leave empty = no link")
         first_comment = st.text_area("💬 First Comment (optional)", height=80, placeholder="Leave empty = no comment")
-        schedule_mode = st.radio("Post or Schedule", ["Post Now", "Schedule for later"], horizontal=True)
+        st.subheader("⏰ Post or Schedule?")
+        schedule_mode = st.radio("Choose", ["Post Now", "Schedule for later"], horizontal=True)
         if schedule_mode == "Post Now":
             scheduled_dt = datetime.now() + timedelta(minutes=5)
-            st.success("🚀 Will post NOW")
+            st.success("🚀 Will post NOW (in ~5 minutes)")
         else:
             scheduled_dt = st.datetime_input("Date & Time", value=datetime.now() + timedelta(days=1, hours=9))
             st.write("**Quick presets:**")
             col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
             with col_p1:
-                if st.button("In 30 min", use_container_width=True): scheduled_dt = datetime.now() + timedelta(minutes=30); st.rerun()
+                if st.button("In 30 min", use_container_width=True):
+                    scheduled_dt = datetime.now() + timedelta(minutes=30)
+                    st.rerun()
             with col_p2:
-                if st.button("In 2 hours", use_container_width=True): scheduled_dt = datetime.now() + timedelta(hours=2); st.rerun()
+                if st.button("In 2 hours", use_container_width=True):
+                    scheduled_dt = datetime.now() + timedelta(hours=2)
+                    st.rerun()
             with col_p3:
-                if st.button("Tomorrow 9AM", use_container_width=True): scheduled_dt = (datetime.now() + timedelta(days=1)).replace(hour=9, minute=0, second=0); st.rerun()
+                if st.button("Tomorrow 9AM", use_container_width=True):
+                    scheduled_dt = (datetime.now() + timedelta(days=1)).replace(hour=9, minute=0, second=0)
+                    st.rerun()
             with col_p4:
                 if st.button("Next Monday 10AM", use_container_width=True):
                     days = (7 - datetime.now().weekday()) % 7 + 7 if datetime.now().weekday() != 0 else 7
-                    scheduled_dt = (datetime.now() + timedelta(days=days)).replace(hour=10, minute=0, second=0); st.rerun()
+                    scheduled_dt = (datetime.now() + timedelta(days=days)).replace(hour=10, minute=0, second=0)
+                    st.rerun()
             with col_p5:
-                if st.button("In 7 days", use_container_width=True): scheduled_dt = datetime.now() + timedelta(days=7); st.rerun()
+                if st.button("In 7 days", use_container_width=True):
+                    scheduled_dt = datetime.now() + timedelta(days=7)
+                    st.rerun()
             st.info(f"✅ Will publish on **{scheduled_dt.strftime('%A, %d %b %Y at %I:%M %p')}**")
         if st.button("🚀 SCHEDULE POST", type="primary", use_container_width=True):
             if not selected_accounts or not media_url:
-                st.error("Select pages + media URL")
+                st.error("Select pages + paste media URL")
             else:
-                acc_ids = [str(acc_df[acc_df["name"]==n]["id"].iloc[0]) for n in selected_accounts]
+                acc_ids = [str(acc_df[acc_df["name"] == n]["id"].iloc[0]) for n in selected_accounts]
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
-                c.execute("""INSERT INTO posts (account_ids, post_type, media_url, caption, first_comment, story_link, scheduled_dt, status) 
-                             VALUES (?,?,?,?,?,?,?,?)""", (",".join(acc_ids), post_type, media_url, caption, first_comment, story_link, scheduled_dt.isoformat(), "pending"))
+                c.execute("""
+                    INSERT INTO posts (account_ids, post_type, media_url, caption, first_comment, story_link, scheduled_dt, status)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, (",".join(acc_ids), post_type, media_url, caption, first_comment, story_link, scheduled_dt.isoformat(), "pending"))
                 conn.commit()
                 conn.close()
                 st.balloons()
@@ -247,7 +387,10 @@ elif page == "✍️ Create Post":
                 st.caption(f"💬 First comment: {first_comment[:80]}...")
         st.markdown("</div>", unsafe_allow_html=True)
 
-# Per Page Posting
+# ────────────────────────────────────────────────
+#               PER PAGE POSTING
+# ────────────────────────────────────────────────
+
 elif page == "📄 Per Page Posting":
     st.markdown("### 📄 Per Page Posting")
     st.caption("Select one page → Manual or CSV for that page only")
@@ -271,9 +414,11 @@ elif page == "📄 Per Page Posting":
         if st.button("Schedule for this page only", type="primary"):
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute("""INSERT INTO posts (account_ids, post_type, media_url, caption, first_comment, story_link, scheduled_dt, status) 
-                         VALUES (?,?,?,?,?,?,?,?)""",
-                      (page_id_for_post, post_type, media_url, caption, first_comment, story_link, scheduled_dt.isoformat(), "pending"))
+            c.execute("""
+                INSERT INTO posts (account_ids, post_type, media_url, caption, first_comment, story_link, scheduled_dt, status)
+                VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (page_id_for_post, post_type, media_url, caption, first_comment, story_link, scheduled_dt.isoformat(), "pending"))
             conn.commit()
             conn.close()
             st.success(f"✅ Scheduled on {selected_page}")
@@ -287,14 +432,19 @@ elif page == "📄 Per Page Posting":
                 c = conn.cursor()
                 for _, row in df.iterrows():
                     dt = datetime.now() + timedelta(minutes=5)
-                    c.execute("""INSERT INTO posts (account_ids, post_type, media_url, caption, first_comment, story_link, scheduled_dt, status) 
-                                 VALUES (?,?,?,?,?,?,?,?)""",
-                              (page_id_for_post, row["post_type"], row["media_url"], row["caption"], row.get("first_comment", ""), row.get("story_link", ""), dt.isoformat(), "pending"))
+                    c.execute("""
+                        INSERT INTO posts (account_ids, post_type, media_url, caption, first_comment, story_link, scheduled_dt, status)
+                        VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    (page_id_for_post, row["post_type"], row["media_url"], row["caption"], row.get("first_comment", ""), row.get("story_link", ""), dt.isoformat(), "pending"))
                 conn.commit()
                 conn.close()
                 st.success(f"✅ {len(df)} posts scheduled on {selected_page}")
 
-# Bulk Schedule
+# ────────────────────────────────────────────────
+#                 BULK SCHEDULE
+# ────────────────────────────────────────────────
+
 elif page == "📦 Bulk Schedule":
     st.markdown("### 📦 Global Bulk Schedule")
     st.info("Format: media_url|caption|post_type|YYYY-MM-DD HH:MM|page1,page2|first_comment|story_link")
@@ -302,7 +452,10 @@ elif page == "📦 Bulk Schedule":
     if st.button("Schedule All"):
         st.success("Global bulk done!")
 
-# Queue
+# ────────────────────────────────────────────────
+#                    QUEUE
+# ────────────────────────────────────────────────
+
 elif page == "📋 Queue":
     st.markdown("### 📋 Queue")
     conn = sqlite3.connect(DB_FILE)
@@ -318,7 +471,10 @@ elif page == "📋 Queue":
         </div>
         """, unsafe_allow_html=True)
 
-# Analytics
+# ────────────────────────────────────────────────
+#                   ANALYTICS
+# ────────────────────────────────────────────────
+
 elif page == "📊 Analytics":
     st.markdown("### 📊 Analytics Dashboard")
     conn = sqlite3.connect(DB_FILE)
@@ -333,7 +489,10 @@ elif page == "📊 Analytics":
     c3.metric("Pending", f"{pending:,}")
     st.line_chart(df_daily.set_index("day")["posts"] if not df_daily.empty else pd.DataFrame())
 
-# Accounts
+# ────────────────────────────────────────────────
+#                   ACCOUNTS
+# ────────────────────────────────────────────────
+
 elif page == "👥 Accounts":
     st.markdown("### 👥 Your Facebook Pages")
     search = st.text_input("Search")
